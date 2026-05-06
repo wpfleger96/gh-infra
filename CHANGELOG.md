@@ -1,5 +1,7 @@
 # Changelog
 
+## [v0.13.1](https://github.com/babarot/gh-infra/compare/v0.13.0...v0.13.1) - 2026-05-06
+
 ## [v0.13.0](https://github.com/babarot/gh-infra/compare/v0.12.0...v0.13.0) - 2026-04-20
 ### New Features
 - Add collection reconciliation policy (additive/authoritative modes) by @babarot in https://github.com/babarot/gh-infra/pull/143
