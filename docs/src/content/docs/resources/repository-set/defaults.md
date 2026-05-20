@@ -141,9 +141,9 @@ repositories:
           enforcement: evaluate   # replaces the entire default ruleset entry
 ```
 
-#### Secrets & Variables
+#### Secrets
 
-Same-name entries are replaced; new entries are appended; default entries not referenced are inherited.
+Same-name entries are replaced; new entries are appended; default entries not referenced are inherited. Variables follow the same rules.
 
 ```yaml
 defaults:
