@@ -608,9 +608,16 @@ func mergeActions(base, override *Actions) *Actions {
 	return &result
 }
 
-// mergeLabels merges two label slices by name. Override labels take precedence
-// for entries with the same name; new labels are appended.
-func mergeLabels(base, override []Label) []Label {
+// mergeByKey merges two slices by a string key derived from each entry. Entries
+// from override with a matching key in base replace the base entry; new entries
+// are appended. Order of base entries is preserved.
+func mergeByKey[T any](base, override []T, key func(T) string) []T {
+	return mergeByKeyWith(base, override, key, func(_, o T) T { return o })
+}
+
+// mergeByKeyWith is like mergeByKey but combines matching entries through a
+// caller-supplied merge function instead of replacing them.
+func mergeByKeyWith[T any](base, override []T, key func(T) string, merge func(base, override T) T) []T {
 	if len(base) == 0 {
 		return override
 	}
@@ -619,49 +626,37 @@ func mergeLabels(base, override []Label) []Label {
 	}
 
 	index := make(map[string]int, len(base))
-	result := make([]Label, len(base))
+	result := make([]T, len(base))
 	copy(result, base)
-	for i, l := range result {
-		index[l.Name] = i
+	for i, x := range result {
+		index[key(x)] = i
 	}
 
-	for _, l := range override {
-		if i, ok := index[l.Name]; ok {
-			result[i] = l
+	for _, x := range override {
+		k := key(x)
+		if i, ok := index[k]; ok {
+			result[i] = merge(result[i], x)
 		} else {
-			index[l.Name] = len(result)
-			result = append(result, l)
+			index[k] = len(result)
+			result = append(result, x)
 		}
 	}
 	return result
 }
 
+// mergeLabels merges two label slices by name. Override labels take precedence
+// for entries with the same name; new labels are appended.
+func mergeLabels(base, override []Label) []Label {
+	return mergeByKey(base, override, func(l Label) string { return l.Name })
+}
+
 // mergeBranchProtection merges two branch protection slices by pattern.
 // Same-pattern entries are merged at the field level; new patterns are appended.
 func mergeBranchProtection(base, override []BranchProtection) []BranchProtection {
-	if len(base) == 0 {
-		return override
-	}
-	if len(override) == 0 {
-		return base
-	}
-
-	index := make(map[string]int, len(base))
-	result := make([]BranchProtection, len(base))
-	copy(result, base)
-	for i, bp := range result {
-		index[bp.Pattern] = i
-	}
-
-	for _, bp := range override {
-		if i, ok := index[bp.Pattern]; ok {
-			result[i] = mergeBranchProtectionEntry(result[i], bp)
-		} else {
-			index[bp.Pattern] = len(result)
-			result = append(result, bp)
-		}
-	}
-	return result
+	return mergeByKeyWith(base, override,
+		func(bp BranchProtection) string { return bp.Pattern },
+		mergeBranchProtectionEntry,
+	)
 }
 
 func mergeBranchProtectionEntry(base, override BranchProtection) BranchProtection {
@@ -696,85 +691,19 @@ func mergeBranchProtectionEntry(base, override BranchProtection) BranchProtectio
 // mergeRulesets merges two ruleset slices by name. Override rulesets take precedence
 // for entries with the same name; new rulesets are appended.
 func mergeRulesets(base, override []Ruleset) []Ruleset {
-	if len(base) == 0 {
-		return override
-	}
-	if len(override) == 0 {
-		return base
-	}
-
-	index := make(map[string]int, len(base))
-	result := make([]Ruleset, len(base))
-	copy(result, base)
-	for i, rs := range result {
-		index[rs.Name] = i
-	}
-
-	for _, rs := range override {
-		if i, ok := index[rs.Name]; ok {
-			result[i] = rs
-		} else {
-			index[rs.Name] = len(result)
-			result = append(result, rs)
-		}
-	}
-	return result
+	return mergeByKey(base, override, func(rs Ruleset) string { return rs.Name })
 }
 
 // mergeSecrets merges two secret slices by name. Override secrets take precedence
 // for entries with the same name; new secrets are appended.
 func mergeSecrets(base, override []Secret) []Secret {
-	if len(base) == 0 {
-		return override
-	}
-	if len(override) == 0 {
-		return base
-	}
-
-	index := make(map[string]int, len(base))
-	result := make([]Secret, len(base))
-	copy(result, base)
-	for i, s := range result {
-		index[s.Name] = i
-	}
-
-	for _, s := range override {
-		if i, ok := index[s.Name]; ok {
-			result[i] = s
-		} else {
-			index[s.Name] = len(result)
-			result = append(result, s)
-		}
-	}
-	return result
+	return mergeByKey(base, override, func(s Secret) string { return s.Name })
 }
 
 // mergeVariables merges two variable slices by name. Override variables take precedence
 // for entries with the same name; new variables are appended.
 func mergeVariables(base, override []Variable) []Variable {
-	if len(base) == 0 {
-		return override
-	}
-	if len(override) == 0 {
-		return base
-	}
-
-	index := make(map[string]int, len(base))
-	result := make([]Variable, len(base))
-	copy(result, base)
-	for i, v := range result {
-		index[v.Name] = i
-	}
-
-	for _, v := range override {
-		if i, ok := index[v.Name]; ok {
-			result[i] = v
-		} else {
-			index[v.Name] = len(result)
-			result = append(result, v)
-		}
-	}
-	return result
+	return mergeByKey(base, override, func(v Variable) string { return v.Name })
 }
 
 func mergeSelectedActions(base, override *SelectedActions) *SelectedActions {

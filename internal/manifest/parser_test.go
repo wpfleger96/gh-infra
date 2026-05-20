@@ -2481,13 +2481,22 @@ repositories:
 	if len(repos[1].Spec.Variables) != 3 {
 		t.Fatalf("adds-variable: expected 3 variables, got %d", len(repos[1].Spec.Variables))
 	}
-	varNames := make(map[string]bool)
 	for _, v := range repos[1].Spec.Variables {
-		varNames[v.Name] = true
-	}
-	for _, want := range []string{"APP_ENV", "REGION", "EXTRA_VAR"} {
-		if !varNames[want] {
-			t.Errorf("adds-variable: missing variable %q", want)
+		switch v.Name {
+		case "APP_ENV":
+			if v.Value != "production" {
+				t.Errorf("adds-variable: APP_ENV value = %q, want production (inherited)", v.Value)
+			}
+		case "REGION":
+			if v.Value != "us-east-1" {
+				t.Errorf("adds-variable: REGION value = %q, want us-east-1 (inherited)", v.Value)
+			}
+		case "EXTRA_VAR":
+			if v.Value != "custom-value" {
+				t.Errorf("adds-variable: EXTRA_VAR value = %q, want custom-value", v.Value)
+			}
+		default:
+			t.Errorf("adds-variable: unexpected variable %q", v.Name)
 		}
 	}
 
