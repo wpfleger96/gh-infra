@@ -28,7 +28,10 @@ func (p *Processor) applyToRepo(ctx context.Context, repo string, changes []Chan
 // applyViaGraphQL creates a verified commit using the GitHub GraphQL createCommitOnBranch
 // mutation. All file changes are committed atomically in a single call.
 func (p *Processor) applyViaGraphQL(ctx context.Context, repo, defaultBranch, headSHA string, changes []Change, opts ApplyOptions, statusFn func(string)) (string, error) {
-	message := resolveCommitMessage(opts)
+	message, err := resolveCommitMessage(opts, repo)
+	if err != nil {
+		return "", fmt.Errorf("render commit message: %w", err)
+	}
 	targetBranch := defaultBranch
 
 	if opts.Via == manifest.ViaPullRequest {
@@ -222,11 +225,27 @@ func (p *Processor) createBranchAt(ctx context.Context, repo, branch, sha string
 func (p *Processor) openPR(ctx context.Context, repo, base, head string, opts ApplyOptions) (string, error) {
 	prTitle := opts.PRTitle
 	if prTitle == "" {
-		prTitle = resolveCommitMessage(opts)
+		var err error
+		prTitle, err = resolveCommitMessage(opts, repo)
+		if err != nil {
+			return "", fmt.Errorf("render PR title: %w", err)
+		}
+	} else if HasTemplate(prTitle, nil) {
+		var err error
+		prTitle, err = RenderCommitMessage(prTitle, repo, opts.SourceURL)
+		if err != nil {
+			return "", fmt.Errorf("render PR title: %w", err)
+		}
 	}
 	prBody := opts.PRBody
 	if prBody == "" {
 		prBody = fmt.Sprintf("Automated file sync by gh-infra FileSet `%s`.", opts.FileSetID)
+	} else if HasTemplate(prBody, nil) {
+		var err error
+		prBody, err = RenderCommitMessage(prBody, repo, opts.SourceURL)
+		if err != nil {
+			return "", fmt.Errorf("render PR body: %w", err)
+		}
 	}
 	out, err := p.runner.Run(ctx, "pr", "create",
 		"--repo", repo,
