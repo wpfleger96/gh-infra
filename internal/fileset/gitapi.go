@@ -118,6 +118,10 @@ func (p *Processor) commitViaGitDataAPI(ctx context.Context, repo, branch, headS
 	if err != nil {
 		return fmt.Errorf("create tree: %w", err)
 	}
+	if newTreeSHA == treeSHA {
+		// GitHub normalized the content to what was already stored — skip the commit.
+		return nil
+	}
 
 	commitBody, err := json.Marshal(map[string]any{
 		"message": message,
