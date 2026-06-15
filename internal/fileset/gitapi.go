@@ -11,8 +11,24 @@ import (
 	"github.com/babarot/gh-infra/internal/manifest"
 )
 
-// applyToRepo creates a verified commit for all file changes using the GitHub GraphQL
-// createCommitOnBranch mutation. Falls back to Contents API for empty repositories.
+// needsGitDataAPI reports whether any change requires the Git Data API
+// (i.e., has executable mode 100755, which createCommitOnBranch does not support).
+func needsGitDataAPI(changes []Change) bool {
+	for _, c := range changes {
+		if c.Executable {
+			return true
+		}
+	}
+	return false
+}
+
+// commitFunc is a function that commits changes to a branch using a specific strategy.
+type commitFunc func(ctx context.Context, repo, branch, headSHA, message string, changes []Change) error
+
+// applyToRepo creates a verified commit for all file changes. Uses the GitHub
+// GraphQL createCommitOnBranch mutation unless any file requires executable mode,
+// in which case the Git Data API is used. Falls back to Contents API for empty
+// repositories.
 // Returns (prURL, error); prURL is non-empty only for pull_request strategy.
 func (p *Processor) applyToRepo(ctx context.Context, repo string, changes []Change, opts ApplyOptions, statusFn func(string)) (string, error) {
 	headSHA, defaultBranch, err := p.getHeadSHA(ctx, repo)
@@ -22,12 +38,16 @@ func (p *Processor) applyToRepo(ctx context.Context, repo string, changes []Chan
 		}
 		return "", fmt.Errorf("get HEAD: %w", err)
 	}
-	return p.applyViaGraphQL(ctx, repo, defaultBranch, headSHA, changes, opts, statusFn)
+	commit := commitFunc(p.commitViaGraphQL)
+	if needsGitDataAPI(changes) {
+		commit = p.commitViaGitDataAPI
+	}
+	return p.applyViaCommitFunc(ctx, repo, defaultBranch, headSHA, changes, opts, statusFn, commit)
 }
 
-// applyViaGraphQL creates a verified commit using the GitHub GraphQL createCommitOnBranch
-// mutation. All file changes are committed atomically in a single call.
-func (p *Processor) applyViaGraphQL(ctx context.Context, repo, defaultBranch, headSHA string, changes []Change, opts ApplyOptions, statusFn func(string)) (string, error) {
+// applyViaCommitFunc handles the shared orchestration for both commit strategies:
+// optional PR branch creation, committing, and optional PR opening.
+func (p *Processor) applyViaCommitFunc(ctx context.Context, repo, defaultBranch, headSHA string, changes []Change, opts ApplyOptions, statusFn func(string), commit commitFunc) (string, error) {
 	message := resolveCommitMessage(opts)
 	targetBranch := defaultBranch
 
@@ -44,7 +64,7 @@ func (p *Processor) applyViaGraphQL(ctx context.Context, repo, defaultBranch, he
 	}
 
 	statusFn("committing changes...")
-	if err := p.commitViaGraphQL(ctx, repo, targetBranch, headSHA, message, changes); err != nil {
+	if err := commit(ctx, repo, targetBranch, headSHA, message, changes); err != nil {
 		return "", err
 	}
 
@@ -53,6 +73,111 @@ func (p *Processor) applyViaGraphQL(ctx context.Context, repo, defaultBranch, he
 		return p.openPR(ctx, repo, defaultBranch, targetBranch, opts)
 	}
 	return "", nil
+}
+
+// commitViaGitDataAPI commits changes using three REST calls:
+// create tree → create commit → update ref.
+// This path is used when any file requires mode 100755 (executable), since
+// the createCommitOnBranch GraphQL mutation only supports mode 100644.
+func (p *Processor) commitViaGitDataAPI(ctx context.Context, repo, branch, headSHA, message string, changes []Change) error {
+	out, err := p.runner.Run(ctx, "api", fmt.Sprintf("repos/%s/git/commits/%s", repo, headSHA), "--jq", ".tree.sha")
+	if err != nil {
+		return fmt.Errorf("get tree SHA: %w", err)
+	}
+	treeSHA := strings.TrimSpace(string(out))
+
+	// Use map[string]any so that nil sha marshals as JSON null (not omitted),
+	// which is what the Trees API requires for deletion.
+	var entries []map[string]any
+	for _, c := range changes {
+		if c.Type == ChangeDelete {
+			// sha: null tells the Trees API to remove this path from the tree.
+			entries = append(entries, map[string]any{"path": c.Path, "sha": nil})
+		} else {
+			mode := "100644"
+			if c.Executable {
+				mode = "100755"
+			}
+			entries = append(entries, map[string]any{
+				"path":    c.Path,
+				"mode":    mode,
+				"type":    "blob",
+				"content": c.Desired,
+			})
+		}
+	}
+
+	treeBody, err := json.Marshal(map[string]any{
+		"base_tree": treeSHA,
+		"tree":      entries,
+	})
+	if err != nil {
+		return err
+	}
+	newTreeSHA, err := p.postJSON(ctx, fmt.Sprintf("repos/%s/git/trees", repo), treeBody, ".sha")
+	if err != nil {
+		return fmt.Errorf("create tree: %w", err)
+	}
+
+	commitBody, err := json.Marshal(map[string]any{
+		"message": message,
+		"tree":    newTreeSHA,
+		"parents": []string{headSHA},
+	})
+	if err != nil {
+		return err
+	}
+	newCommitSHA, err := p.postJSON(ctx, fmt.Sprintf("repos/%s/git/commits", repo), commitBody, ".sha")
+	if err != nil {
+		return fmt.Errorf("create commit: %w", err)
+	}
+
+	refBody, err := json.Marshal(map[string]any{
+		"sha": newCommitSHA,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = p.patchJSON(ctx, fmt.Sprintf("repos/%s/git/refs/heads/%s", repo, branch), refBody)
+	if err != nil {
+		return fmt.Errorf("update ref: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Processor) postJSON(ctx context.Context, endpoint string, body []byte, jqFilter string) (string, error) {
+	tmpFile, err := os.CreateTemp("", "gh-infra-api-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write(body); err != nil {
+		tmpFile.Close()
+		return "", fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	out, err := p.runner.Run(ctx, "api", endpoint, "--method", "POST", "--input", tmpFile.Name(), "--jq", jqFilter)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (p *Processor) patchJSON(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	tmpFile, err := os.CreateTemp("", "gh-infra-api-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write(body); err != nil {
+		tmpFile.Close()
+		return nil, fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	return p.runner.Run(ctx, "api", endpoint, "--method", "PATCH", "--input", tmpFile.Name())
 }
 
 // commitViaGraphQL sends a createCommitOnBranch GraphQL mutation.
