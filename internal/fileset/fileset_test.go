@@ -330,6 +330,88 @@ func TestApply_NoOpNotApplied(t *testing.T) {
 	}
 }
 
+// setupGitDataAPIMock creates a WildcardMockRunner for the Git Data API commit path.
+// newTreeSHA controls what POST /git/trees returns; set it equal to the base tree SHA
+// to simulate the noop case (GitHub normalized content to what was already stored).
+func setupGitDataAPIMock(repo, newTreeSHA string) *WildcardMockRunner {
+	const baseTreeSHA = "tree-sha-aaa"
+	return &WildcardMockRunner{
+		MockRunner: gh.MockRunner{
+			Responses: map[string][]byte{
+				fmt.Sprintf("repo view %s --json defaultBranchRef --jq .defaultBranchRef.name", repo): []byte("main"),
+				fmt.Sprintf("api repos/%s/git/ref/heads/main --jq .object.sha", repo):                 []byte("head123"),
+				fmt.Sprintf("api repos/%s/git/commits/head123 --jq .tree.sha", repo):                  []byte(baseTreeSHA),
+			},
+			Errors: map[string]error{},
+		},
+		DefaultResponse: []byte(newTreeSHA),
+	}
+}
+
+func TestApply_GitDataAPI_SkipsCommitWhenTreeUnchanged(t *testing.T) {
+	// newTreeSHA == baseTreeSHA: GitHub normalized content to what was already stored.
+	mock := setupGitDataAPIMock("owner/repo", "tree-sha-aaa")
+	p := NewProcessor(mock, ui.NewStandardPrinterWith(&bytes.Buffer{}, &bytes.Buffer{}))
+
+	changes := []Change{
+		{
+			FileSetID:  "ci-files",
+			Target:     "owner/repo",
+			Path:       "bin/tool",
+			Type:       ChangeCreate,
+			Desired:    "#!/bin/sh\necho hello",
+			Executable: true,
+		},
+	}
+
+	results := p.Apply(context.Background(), changes, ApplyOptions{FileSetID: "test"}, ui.NoopReporter{})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("unexpected error: %v", results[0].Err)
+	}
+
+	// The noop guard should have fired: no ref update means no commit was created.
+	callLog := strings.Join(flattenCalls(mock.Called), " | ")
+	if strings.Contains(callLog, "git/refs") {
+		t.Errorf("expected no ref update (noop), but git/refs was called: %s", callLog)
+	}
+}
+
+func TestApply_GitDataAPI_CommitsWhenTreeChanged(t *testing.T) {
+	// newTreeSHA != baseTreeSHA: content genuinely changed, commit should proceed.
+	mock := setupGitDataAPIMock("owner/repo", "tree-sha-bbb")
+	p := NewProcessor(mock, ui.NewStandardPrinterWith(&bytes.Buffer{}, &bytes.Buffer{}))
+
+	changes := []Change{
+		{
+			FileSetID:  "ci-files",
+			Target:     "owner/repo",
+			Path:       "bin/tool",
+			Type:       ChangeCreate,
+			Desired:    "#!/bin/sh\necho hello",
+			Executable: true,
+		},
+	}
+
+	results := p.Apply(context.Background(), changes, ApplyOptions{FileSetID: "test"}, ui.NoopReporter{})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("unexpected error: %v", results[0].Err)
+	}
+
+	// The guard should NOT have fired: ref update confirms the commit was created.
+	callLog := strings.Join(flattenCalls(mock.Called), " | ")
+	if !strings.Contains(callLog, "git/refs") {
+		t.Errorf("expected ref update after commit, but git/refs was not called: %s", callLog)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // HasChanges tests
 // ---------------------------------------------------------------------------
