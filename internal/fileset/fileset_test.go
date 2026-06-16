@@ -208,10 +208,13 @@ func TestPlan_MultipleFilesDiffer(t *testing.T) {
 // Apply tests
 // ---------------------------------------------------------------------------
 
-// WildcardMockRunner extends MockRunner to return a default response for unmatched keys.
+// WildcardMockRunner extends MockRunner to return responses for unmatched keys.
+// Resolution order: Responses (exact key) → ContainsResponses (substring) → DefaultResponse.
 type WildcardMockRunner struct {
 	gh.MockRunner
-	DefaultResponse []byte
+	// ContainsResponses maps a substring to a response; first match wins.
+	ContainsResponses map[string][]byte
+	DefaultResponse   []byte
 }
 
 func (m *WildcardMockRunner) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -223,26 +226,39 @@ func (m *WildcardMockRunner) Run(_ context.Context, args ...string) ([]byte, err
 	if resp, ok := m.Responses[key]; ok {
 		return resp, nil
 	}
-	// Return default response for unmatched calls (Git Data API calls with dynamic args)
+	for substr, resp := range m.ContainsResponses {
+		if strings.Contains(key, substr) {
+			return resp, nil
+		}
+	}
 	return m.DefaultResponse, nil
 }
 
 // setupGraphQLMock creates a WildcardMockRunner for the GraphQL-based commit path.
+// The noop check (isContentNoop) creates a proposed tree and compares SHAs;
+// the mock returns a different new tree SHA so the noop guard does NOT fire and
+// the GraphQL mutation is reached.
 func setupGraphQLMock(repo string) *WildcardMockRunner {
-	mock := &WildcardMockRunner{
+	const baseTreeSHA = "tree-sha-aaa"
+	return &WildcardMockRunner{
 		MockRunner: gh.MockRunner{
 			Responses: map[string][]byte{
 				// Get default branch
 				fmt.Sprintf("repo view %s --json defaultBranchRef --jq .defaultBranchRef.name", repo): []byte("main"),
 				// Get HEAD SHA
 				fmt.Sprintf("api repos/%s/git/ref/heads/main --jq .object.sha", repo): []byte("head123"),
+				// isContentNoop: fetch current tree SHA
+				fmt.Sprintf("api repos/%s/git/commits/head123 --jq .tree.sha", repo): []byte(baseTreeSHA),
 			},
 			Errors: map[string]error{},
 		},
-		// Default response for GraphQL mutation and other dynamic calls
+		// isContentNoop tree creation returns a different SHA → noop guard does not fire.
+		ContainsResponses: map[string][]byte{
+			"git/trees": []byte("tree-sha-bbb"),
+		},
+		// Default response for the GraphQL mutation (and any other unmatched dynamic calls).
 		DefaultResponse: []byte(`{"data":{"createCommitOnBranch":{"commit":{"oid":"new-sha-456"}}}}`),
 	}
-	return mock
 }
 
 func TestApply_CreateFile(t *testing.T) {
@@ -345,6 +361,87 @@ func setupGitDataAPIMock(repo, newTreeSHA string) *WildcardMockRunner {
 			Errors: map[string]error{},
 		},
 		DefaultResponse: []byte(newTreeSHA),
+	}
+}
+
+// setupGraphQLNoopMock creates a WildcardMockRunner for the GraphQL path where
+// isContentNoop returns true (proposed tree SHA == current tree SHA).
+func setupGraphQLNoopMock(repo string) *WildcardMockRunner {
+	const baseTreeSHA = "tree-sha-aaa"
+	return &WildcardMockRunner{
+		MockRunner: gh.MockRunner{
+			Responses: map[string][]byte{
+				fmt.Sprintf("repo view %s --json defaultBranchRef --jq .defaultBranchRef.name", repo): []byte("main"),
+				fmt.Sprintf("api repos/%s/git/ref/heads/main --jq .object.sha", repo):                 []byte("head123"),
+				fmt.Sprintf("api repos/%s/git/commits/head123 --jq .tree.sha", repo):                  []byte(baseTreeSHA),
+			},
+			Errors: map[string]error{},
+		},
+		// Same SHA as baseTreeSHA → noop guard fires.
+		ContainsResponses: map[string][]byte{
+			"git/trees": []byte(baseTreeSHA),
+		},
+		DefaultResponse: []byte(`{"data":{"createCommitOnBranch":{"commit":{"oid":"new-sha-456"}}}}`),
+	}
+}
+
+func TestApply_GraphQL_SkipsCommitWhenTreeUnchanged(t *testing.T) {
+	mock := setupGraphQLNoopMock("owner/repo")
+	p := NewProcessor(mock, ui.NewStandardPrinterWith(&bytes.Buffer{}, &bytes.Buffer{}))
+
+	changes := []Change{
+		{
+			FileSetID: "ci-files",
+			Target:    "owner/repo",
+			Path:      ".github/ci.yml",
+			Type:      ChangeCreate,
+			Desired:   "name: CI",
+		},
+	}
+
+	results := p.Apply(context.Background(), changes, ApplyOptions{FileSetID: "test"}, ui.NoopReporter{})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("unexpected error: %v", results[0].Err)
+	}
+
+	// Noop guard fired: GraphQL mutation must not have been called.
+	callLog := strings.Join(flattenCalls(mock.Called), " | ")
+	if strings.Contains(callLog, "api graphql") {
+		t.Errorf("expected no GraphQL mutation (noop), but it was called: %s", callLog)
+	}
+}
+
+func TestApply_GraphQL_CommitsWhenTreeChanged(t *testing.T) {
+	mock := setupGraphQLMock("owner/repo")
+	p := NewProcessor(mock, ui.NewStandardPrinterWith(&bytes.Buffer{}, &bytes.Buffer{}))
+
+	changes := []Change{
+		{
+			FileSetID: "ci-files",
+			Target:    "owner/repo",
+			Path:      ".github/ci.yml",
+			Type:      ChangeCreate,
+			Desired:   "name: CI",
+		},
+	}
+
+	results := p.Apply(context.Background(), changes, ApplyOptions{FileSetID: "test"}, ui.NoopReporter{})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("unexpected error: %v", results[0].Err)
+	}
+
+	// Noop guard did not fire: GraphQL mutation must have been called.
+	callLog := strings.Join(flattenCalls(mock.Called), " | ")
+	if !strings.Contains(callLog, "api graphql") {
+		t.Errorf("expected GraphQL mutation call, got: %s", callLog)
 	}
 }
 
