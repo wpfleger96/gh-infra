@@ -63,6 +63,15 @@ func (p *Processor) applyViaCommitFunc(ctx context.Context, repo, defaultBranch,
 		targetBranch = prBranch
 	}
 
+	noop, err := p.isContentNoop(ctx, repo, headSHA, changes)
+	if err != nil {
+		return "", fmt.Errorf("noop check: %w", err)
+	}
+	if noop {
+		statusFn("no content change after GitHub normalization — skipping commit")
+		return "", nil
+	}
+
 	statusFn("committing changes...")
 	if err := commit(ctx, repo, targetBranch, headSHA, message, changes); err != nil {
 		return "", err
@@ -73,6 +82,48 @@ func (p *Processor) applyViaCommitFunc(ctx context.Context, repo, defaultBranch,
 		return p.openPR(ctx, repo, defaultBranch, targetBranch, opts)
 	}
 	return "", nil
+}
+
+// isContentNoop reports whether the proposed changes produce an identical tree to
+// the current HEAD. This guards both commit paths against empty commits that arise
+// when GitHub normalizes file content (e.g. trailing whitespace) on ingest.
+func (p *Processor) isContentNoop(ctx context.Context, repo, headSHA string, changes []Change) (bool, error) {
+	out, err := p.runner.Run(ctx, "api", fmt.Sprintf("repos/%s/git/commits/%s", repo, headSHA), "--jq", ".tree.sha")
+	if err != nil {
+		return false, fmt.Errorf("get tree SHA: %w", err)
+	}
+	treeSHA := strings.TrimSpace(string(out))
+
+	var entries []map[string]any
+	for _, c := range changes {
+		if c.Type == ChangeDelete {
+			entries = append(entries, map[string]any{"path": c.Path, "sha": nil})
+		} else {
+			mode := "100644"
+			if c.Executable {
+				mode = "100755"
+			}
+			entries = append(entries, map[string]any{
+				"path":    c.Path,
+				"mode":    mode,
+				"type":    "blob",
+				"content": c.Desired,
+			})
+		}
+	}
+
+	treeBody, err := json.Marshal(map[string]any{
+		"base_tree": treeSHA,
+		"tree":      entries,
+	})
+	if err != nil {
+		return false, err
+	}
+	newTreeSHA, err := p.postJSON(ctx, fmt.Sprintf("repos/%s/git/trees", repo), treeBody, ".sha")
+	if err != nil {
+		return false, fmt.Errorf("create tree: %w", err)
+	}
+	return newTreeSHA == treeSHA, nil
 }
 
 // commitViaGitDataAPI commits changes using three REST calls:
@@ -117,10 +168,6 @@ func (p *Processor) commitViaGitDataAPI(ctx context.Context, repo, branch, headS
 	newTreeSHA, err := p.postJSON(ctx, fmt.Sprintf("repos/%s/git/trees", repo), treeBody, ".sha")
 	if err != nil {
 		return fmt.Errorf("create tree: %w", err)
-	}
-	if newTreeSHA == treeSHA {
-		// GitHub normalized the content to what was already stored — skip the commit.
-		return nil
 	}
 
 	commitBody, err := json.Marshal(map[string]any{
