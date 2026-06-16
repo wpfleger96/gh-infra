@@ -53,8 +53,8 @@ Currently open upstream PRs (update as PRs merge):
   `wpfleger96/feat/executable-files` branch; not yet in `origin/main`. Any fix
   targeting this function must be stacked on #167.
 - **`commitViaGraphQL`**: the default commit path for non-executable files; exists
-  in `origin/main`. The empty-commit noop bug (issue #168) also affects this path
-  but requires an extra API round-trip to detect — left for a follow-up.
+  in `origin/main`. The noop guard now covers this path via `isContentNoop` in
+  `applyViaCommitFunc` (PR #169).
 
 ## No commit trailers
 
