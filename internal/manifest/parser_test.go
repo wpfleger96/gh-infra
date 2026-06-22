@@ -629,9 +629,10 @@ repositories:
 }
 
 func TestResolveSecrets_ExpandsEnvVars(t *testing.T) {
-	// Set test environment variables
 	t.Setenv("ENV_SECRET_TOKEN", "my-secret-value")
 	t.Setenv("ENV_API_KEY", "api-key-123")
+	t.Setenv("NOT_ENV_PREFIX", "no-prefix-value")
+	t.Setenv("RELEASE_APP_PRIVATE_KEY", "pem-key-data")
 
 	repos := []*Repository{
 		{
@@ -642,6 +643,7 @@ func TestResolveSecrets_ExpandsEnvVars(t *testing.T) {
 					{Name: "API_KEY", Value: "${ENV_API_KEY}"},
 					{Name: "LITERAL", Value: "plain-value"},
 					{Name: "NON_ENV", Value: "${NOT_ENV_PREFIX}"},
+					{Name: "APP_KEY", Value: "${RELEASE_APP_PRIVATE_KEY}"},
 				},
 			},
 		},
@@ -656,7 +658,8 @@ func TestResolveSecrets_ExpandsEnvVars(t *testing.T) {
 		{0, "my-secret-value"},
 		{1, "api-key-123"},
 		{2, "plain-value"},
-		{3, "${NOT_ENV_PREFIX}"},
+		{3, "no-prefix-value"},
+		{4, "pem-key-data"},
 	}
 
 	for _, tt := range tests {
@@ -664,6 +667,34 @@ func TestResolveSecrets_ExpandsEnvVars(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("secret[%d].Value = %q, want %q", tt.idx, got, tt.want)
 		}
+	}
+}
+
+func TestResolveSecrets_WarnOnEmptyResolution(t *testing.T) {
+	repos := []*Repository{
+		{
+			Metadata: RepositoryMetadata{Name: "myrepo", Owner: "org"},
+			Spec: RepositorySpec{
+				Secrets: []Secret{
+					{Name: "MISSING", Value: "${UNSET_VAR_XYZ}"},
+					{Name: "PRESENT", Value: "${ENV_SECRET_TOKEN}"},
+					{Name: "LITERAL", Value: "plain"},
+				},
+			},
+		},
+	}
+	t.Setenv("ENV_SECRET_TOKEN", "tok")
+
+	warnings := ResolveSecrets(repos)
+
+	if len(warnings) != 1 {
+		t.Fatalf("want 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "MISSING") {
+		t.Errorf("warning should mention secret name MISSING, got: %s", warnings[0])
+	}
+	if repos[0].Spec.Secrets[0].Value != "" {
+		t.Errorf("unset var should resolve to empty string, got %q", repos[0].Spec.Secrets[0].Value)
 	}
 }
 

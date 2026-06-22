@@ -85,7 +85,9 @@ func Plan(opts PlanOptions) (*PlanResult, error) {
 	}
 
 	if !opts.DryRun {
-		manifest.ResolveSecrets(parsed.Repositories)
+		for _, w := range manifest.ResolveSecrets(parsed.Repositories) {
+			p.Warning("secrets", w)
+		}
 	}
 
 	var resolverOwner string
