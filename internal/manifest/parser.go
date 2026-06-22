@@ -726,21 +726,28 @@ func mergeSelectedActions(base, override *SelectedActions) *SelectedActions {
 	return &result
 }
 
-// expandEnvVars replaces ${ENV_*} references with actual environment variables.
+// expandEnvVars replaces ${VAR} references with environment variable values.
 func expandEnvVars(s string) string {
-	return os.Expand(s, func(key string) string {
-		if strings.HasPrefix(key, "ENV_") {
-			return os.Getenv(key)
-		}
-		return "${" + key + "}"
-	})
+	return os.Expand(s, os.Getenv)
 }
 
 // ResolveSecrets expands environment variable references in secret values.
-func ResolveSecrets(repos []*Repository) {
+// Returns warnings for secret values that contained ${VAR} references but
+// resolved to empty string, indicating a missing or unset environment variable.
+func ResolveSecrets(repos []*Repository) []string {
+	var warnings []string
 	for _, repo := range repos {
 		for i := range repo.Spec.Secrets {
-			repo.Spec.Secrets[i].Value = expandEnvVars(repo.Spec.Secrets[i].Value)
+			original := repo.Spec.Secrets[i].Value
+			resolved := expandEnvVars(original)
+			repo.Spec.Secrets[i].Value = resolved
+			if strings.Contains(original, "${") && resolved == "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"repo %s: secret %q resolved to empty string — check that the referenced env var is set",
+					repo.Metadata.Name, repo.Spec.Secrets[i].Name,
+				))
+			}
 		}
 	}
+	return warnings
 }
