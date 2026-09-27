@@ -11,6 +11,8 @@ import (
 	"github.com/babarot/gh-infra/internal/manifest"
 )
 
+const maxCommitRetries = 3
+
 // needsGitDataAPI reports whether any change requires the Git Data API
 // (i.e., has executable mode 100755, which createCommitOnBranch does not support).
 func needsGitDataAPI(changes []Change) bool {
@@ -47,6 +49,10 @@ func (p *Processor) applyToRepo(ctx context.Context, repo string, changes []Chan
 
 // applyViaCommitFunc handles the shared orchestration for both commit strategies:
 // optional PR branch creation, committing, and optional PR opening.
+// Retries up to maxCommitRetries times on HEAD conflict errors caused by concurrent commits,
+// refetching the target branch's HEAD before each retry.
+// For pull_request mode, branch creation and PR opening happen outside the retry loop so
+// that only the commit itself is retried on conflict.
 func (p *Processor) applyViaCommitFunc(ctx context.Context, repo, defaultBranch, headSHA string, changes []Change, opts ApplyOptions, statusFn func(string), commit commitFunc) (string, error) {
 	message := resolveCommitMessage(opts)
 	targetBranch := defaultBranch
@@ -63,18 +69,33 @@ func (p *Processor) applyViaCommitFunc(ctx context.Context, repo, defaultBranch,
 		targetBranch = prBranch
 	}
 
-	noop, err := p.isContentNoop(ctx, repo, headSHA, changes)
-	if err != nil {
-		return "", fmt.Errorf("noop check: %w", err)
-	}
-	if noop {
-		statusFn("no content change after GitHub normalization — skipping commit")
-		return "", nil
-	}
+	for attempt := range maxCommitRetries {
+		// Re-checked on every attempt: a concurrent commit that caused a HEAD
+		// conflict may already contain our exact content.
+		noop, err := p.isContentNoop(ctx, repo, headSHA, changes)
+		if err != nil {
+			return "", fmt.Errorf("noop check: %w", err)
+		}
+		if noop {
+			statusFn("no content change after GitHub normalization — skipping commit")
+			return "", nil
+		}
 
-	statusFn("committing changes...")
-	if err := commit(ctx, repo, targetBranch, headSHA, message, changes); err != nil {
-		return "", err
+		statusFn("committing changes...")
+		err = commit(ctx, repo, targetBranch, headSHA, message, changes)
+		if err == nil {
+			break
+		}
+		if !isHeadConflict(err) {
+			return "", err
+		}
+		if attempt == maxCommitRetries-1 {
+			return "", fmt.Errorf("commit retries exhausted for %s: %w", repo, err)
+		}
+		headSHA, err = p.getRefSHA(ctx, repo, targetBranch)
+		if err != nil {
+			return "", fmt.Errorf("get HEAD for retry: %w", err)
+		}
 	}
 
 	if opts.Via == manifest.ViaPullRequest {
@@ -231,6 +252,19 @@ func (p *Processor) patchJSON(ctx context.Context, endpoint string, body []byte)
 	return p.runner.Run(ctx, "api", endpoint, "--method", "PATCH", "--input", tmpFile.Name())
 }
 
+// isHeadConflict reports whether err indicates that a concurrent commit advanced the
+// branch between our HEAD fetch and the commit. createCommitOnBranch returns
+// `Expected branch to point to "<sha>" but it did not.  Pull and try again.`;
+// the Git Data API update-ref call returns HTTP 422 `Update is not a fast forward`.
+func isHeadConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return (strings.Contains(msg, "Expected branch to point to") && strings.Contains(msg, "but it did not")) ||
+		strings.Contains(msg, "Update is not a fast forward")
+}
+
 // commitViaGraphQL sends a createCommitOnBranch GraphQL mutation.
 // GitHub automatically marks these commits as Verified regardless of token type.
 func (p *Processor) commitViaGraphQL(ctx context.Context, repo, branch, headSHA, message string, changes []Change) error {
@@ -364,12 +398,20 @@ func (p *Processor) getHeadSHA(ctx context.Context, repo string) (sha, branch st
 		return "", "", fmt.Errorf("repository is empty (no default branch)")
 	}
 
-	out, err = p.runner.Run(ctx, "api", fmt.Sprintf("repos/%s/git/ref/heads/%s", repo, branch), "--jq", ".object.sha")
+	sha, err = p.getRefSHA(ctx, repo, branch)
 	if err != nil {
 		return "", "", err
 	}
-	sha = strings.TrimSpace(string(out))
 	return sha, branch, nil
+}
+
+// getRefSHA returns the commit SHA that the given branch currently points to.
+func (p *Processor) getRefSHA(ctx context.Context, repo, branch string) (string, error) {
+	out, err := p.runner.Run(ctx, "api", fmt.Sprintf("repos/%s/git/ref/heads/%s", repo, branch), "--jq", ".object.sha")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // createBranchAt creates or force-updates a branch pointing to the given SHA.
