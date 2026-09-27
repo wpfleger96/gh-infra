@@ -51,6 +51,7 @@ Currently open upstream PRs merged into `dev` (update as PRs merge):
 - #167 `feat: support executable file mode in FileSet` — adds `commitViaGitDataAPI`
 - #169 `fix: skip commit when GitHub normalizes content to existing tree` + paired
   squash/merge commit fields — stacked on #167
+- #176 `fix(manifest)`: carry `allow_auto_merge` through `merge_strategy` overrides (was dropped by `mergeMergeStrategy`)
 
 Merged upstream (no longer carried separately on `dev`):
 - #152, #158 (released in v0.13.1)
