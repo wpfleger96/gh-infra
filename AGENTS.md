@@ -43,18 +43,51 @@ just the new changes.
 Note the stacking relationship in both PR descriptions and cross-reference with
 `Related: #N` or `Stacked on #N`.
 
-Currently open upstream PRs (update as PRs merge):
+Currently open upstream PRs merged into `dev` (update as PRs merge):
+- #160 `when:` clause / `conditional_spec` for conditional RepositorySet settings, incl. `defaults`
+- #161 `plan --diff` — inline FileSet diffs in plan output
+- #163 retry `createCommitOnBranch` on HEAD conflict
+- #164 commit message templates (`<% .Source.URL %>` via `GH_INFRA_SOURCE_URL`, headline/body split)
 - #167 `feat: support executable file mode in FileSet` — adds `commitViaGitDataAPI`
-- #169 `fix: skip commit when GitHub normalizes content to existing tree` — stacked on #167
+- #169 `fix: skip commit when GitHub normalizes content to existing tree` + paired
+  squash/merge commit fields — stacked on #167
+
+Merged upstream (no longer carried separately on `dev`):
+- #152, #158 (released in v0.13.1)
+- #159 silent-accept detection (merge strategy PATCH verification)
+- #170 `${ENV_*}` expansion (merged 2026-09-27, unreleased as of v0.13.1)
+
+## Rebuilding dev
+
+`dev` = `upstream/main` + this `AGENTS.md` + every open PR branch merged in with
+`--no-ff`. When upstream merges PRs, rebuild `dev` from `upstream/main` rather than
+keeping pre-review copies of merged work on `dev`:
+
+```
+git worktree add .worktrees/dev-rebuild -b dev-rebuild upstream/main
+git checkout origin/dev -- AGENTS.md && git commit -m "chore: add AGENTS.md with fork workflow notes (dev-branch only)"
+git merge --no-ff -m "chore: merge <slug> into dev" origin/<branch>   # per open PR, stack order
+```
+
+Run `make test` after each merge, then force-push the result to `origin/dev`.
 
 ## Key code notes
 
 - **`commitViaGitDataAPI`** (added in PR #167): only exists on `dev` and the
-  `wpfleger96/feat/executable-files` branch; not yet in `origin/main`. Any fix
+  `wpfleger96/feat/executable-files` branch; not yet in `upstream/main`. Any fix
   targeting this function must be stacked on #167.
 - **`commitViaGraphQL`**: the default commit path for non-executable files; exists
-  in `origin/main`. The noop guard now covers this path via `isContentNoop` in
-  `applyViaCommitFunc` (PR #169).
+  in `upstream/main`. `applyToRepo` picks it or `commitViaGitDataAPI` (via
+  `needsGitDataAPI`) as a `commitFunc` and hands off to `applyViaCommitFunc`.
+- **`applyViaCommitFunc`** (#169): shared orchestration — PR branch creation,
+  `isContentNoop` guard, commit, PR open. On `dev` the #163 retry loop lives here
+  around the noop check + `commit(...)` call, so it covers both commit paths; the
+  noop check re-runs against the refetched HEAD on retry. `isHeadConflict` matches
+  both the GraphQL `Expected branch to point to ... but it did not` error and the
+  Git Data API update-ref `Update is not a fast forward` (HTTP 422).
+- **Commit messages** (#164): `resolveCommitMessage` renders templates once in
+  `applyViaCommitFunc`; GraphQL splits it into headline/body, the Git Data API uses
+  the full multi-line message as-is.
 
 ## No commit trailers
 
