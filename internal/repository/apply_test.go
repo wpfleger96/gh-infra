@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1420,6 +1421,56 @@ func TestApplyActionsPermissions_WithSHAPinningRequired(t *testing.T) {
 	}
 	if payload["sha_pinning_required"] != true {
 		t.Errorf("sha_pinning_required = %v, want true", payload["sha_pinning_required"])
+	}
+}
+
+func TestApplyActionsPermissions_DisabledSendsOnlyEnabled(t *testing.T) {
+	// Fields inherited from defaults must not be sent: GitHub returns 409
+	// "You can't specify 'allowed_actions' unless enabled is true".
+	mock := &gh.MockRunner{}
+	proc := NewProcessor(mock, nil)
+
+	err := proc.applyActionsPermissions(context.Background(), "myorg", "myrepo", &manifest.Actions{
+		Enabled:            manifest.Ptr(false),
+		AllowedActions:     manifest.Ptr("all"),
+		SHAPinningRequired: manifest.Ptr(false),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mock.Called) != 1 {
+		t.Fatalf("expected 1 gh call, got %d", len(mock.Called))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(mock.CalledStdin[0], &payload); err != nil {
+		t.Fatalf("failed to parse stdin payload: %v", err)
+	}
+	want := map[string]any{"enabled": false}
+	if !reflect.DeepEqual(payload, want) {
+		t.Errorf("payload = %v, want %v", payload, want)
+	}
+}
+
+func TestApplyAllSettings_ActionsDisabledSkipsSelectedActions(t *testing.T) {
+	mock := &gh.MockRunner{}
+	proc := NewProcessor(mock, nil)
+
+	repo := newTestRepo("myorg", "myrepo")
+	repo.Spec.Actions = &manifest.Actions{
+		Enabled:        manifest.Ptr(false),
+		AllowedActions: manifest.Ptr("selected"),
+		SelectedActions: &manifest.SelectedActions{
+			GithubOwnedAllowed: manifest.Ptr(true),
+		},
+	}
+
+	if err := proc.applyAllSettings(context.Background(), repo); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, args := range mock.Called {
+		if call := strings.Join(args, " "); strings.Contains(call, "selected-actions") {
+			t.Errorf("unexpected selected-actions call while actions disabled: %s", call)
+		}
 	}
 }
 
