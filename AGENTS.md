@@ -48,6 +48,8 @@ Note the stacking relationship in both PR descriptions and cross-reference with
 Currently open upstream PRs merged into `dev` (update as PRs merge):
 - #160 `when:` clause / `conditional_spec` for conditional RepositorySet settings, incl. `defaults`
 - #164 commit message templates (`<% .Source.URL %>` via `GH_INFRA_SOURCE_URL`, headline/body split)
+- #203 apply matches FileSet changes by the originating FileSet, not `Identity()` (which
+  unnamed FileSets with the same repo list, or `File` manifests for one repo, share)
 
 Merged upstream (no longer carried separately on `dev`):
 - #161 `plan --diff` and #167 executable file mode (merged 2026-10-10, after
