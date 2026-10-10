@@ -2291,7 +2291,7 @@ func TestDiffActions_DisabledIgnoresPermissionFields(t *testing.T) {
 	desired.Spec.Actions = &manifest.Actions{
 		Enabled:            manifest.Ptr(false),
 		AllowedActions:     manifest.Ptr("all"),
-		SHAPinningRequired: manifest.Ptr(false),
+		SHAPinningRequired: manifest.Ptr(true),
 		SelectedActions: &manifest.SelectedActions{
 			GithubOwnedAllowed: manifest.Ptr(true),
 			VerifiedAllowed:    manifest.Ptr(true),
@@ -2315,13 +2315,15 @@ func TestDiffActions_DisabledIgnoresPermissionFields(t *testing.T) {
 func TestDiffActions_DisablingReportsOnlyEnabled(t *testing.T) {
 	desired := baseDesired()
 	desired.Spec.Actions = &manifest.Actions{
-		Enabled:        manifest.Ptr(false),
-		AllowedActions: manifest.Ptr("all"),
+		Enabled:            manifest.Ptr(false),
+		AllowedActions:     manifest.Ptr("all"),
+		SHAPinningRequired: manifest.Ptr(true),
 	}
 	current := baseState()
 	current.Actions = CurrentActions{
-		Enabled:        true,
-		AllowedActions: "local_only",
+		Enabled:            true,
+		AllowedActions:     "local_only",
+		SHAPinningRequired: false,
 	}
 
 	var actionsChange *Change
